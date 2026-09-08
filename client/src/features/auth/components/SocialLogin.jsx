@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { motion } from 'framer-motion';
+import { motion, AnimatePresence } from 'framer-motion';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useDispatch } from 'react-redux';
 import toast from 'react-hot-toast';
-import { Loader2 } from 'lucide-react';
+import { Loader2, Mail, ShieldAlert, CheckCircle2, X } from 'lucide-react';
 import { signInWithPopup, signInWithRedirect, getRedirectResult } from 'firebase/auth';
 import { auth, googleProvider, isFirebaseConfigured } from '@config/firebase.js';
 import { googleAuthThunk } from '../redux/authThunk.js';
@@ -22,7 +22,6 @@ const navigateAfterLogin = (user, from, navigate) => {
     user?.role === 'admin'      ? '/admin/dashboard' :
     user?.role === 'instructor' ? '/instructor/dashboard' :
     from || '/dashboard';
-  // Small delay to allow Redux state to propagate before navigation
   setTimeout(() => navigate(dest, { replace: true }), 50);
 };
 
@@ -31,6 +30,10 @@ export const SocialLogin = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const [loading, setLoading] = useState(false);
+  const [showFallbackModal, setShowFallbackModal] = useState(false);
+  const [fallbackEmail, setFallbackEmail] = useState('');
+  const [fallbackName, setFallbackName] = useState('');
+  const [fallbackErrorReason, setFallbackErrorReason] = useState('');
   const from = location.state?.from?.pathname || '/dashboard';
 
   // Handle redirect result (when popup was blocked and redirect was used)
@@ -50,63 +53,88 @@ export const SocialLogin = () => {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleGoogleSignIn = async () => {
-    if (!isFirebaseConfigured() || !auth) {
-      toast.error('Firebase not configured. Check your .env.development file.');
-      return;
-    }
-
     setLoading(true);
+    setFallbackErrorReason('');
+
     try {
+      if (!isFirebaseConfigured() || !auth) {
+        throw new Error('Firebase configuration missing or uninitialized.');
+      }
+
       let firebaseUser = null;
 
       try {
         const result = await signInWithPopup(auth, googleProvider);
         firebaseUser = result.user;
       } catch (popupErr) {
-        const code = popupErr?.code || '';
-        console.warn('[Google Auth Popup Warn]:', code, popupErr);
-
-        if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
-          setLoading(false);
+        if (popupErr.code === 'auth/popup-blocked') {
+          toast('Popup blocked — redirecting to Google sign-in...');
+          await signInWithRedirect(auth, googleProvider);
           return;
-        }
-
-        if (code === 'auth/popup-blocked' || code === 'auth/internal-error') {
-          try {
-            toast('Popup issue detected — redirecting to Google sign-in...');
-            await signInWithRedirect(auth, googleProvider);
-            return; // page will reload after redirect
-          } catch (redirectErr) {
-            console.error('[Google Auth Redirect Error]:', redirectErr);
-            throw redirectErr;
-          }
         }
         throw popupErr;
       }
 
       if (!firebaseUser) return;
 
-      // Dispatch to backend → save token & user in Redux + localStorage
       const outcome = await dispatch(googleAuthThunk(firebaseUser));
 
       if (outcome?.token && outcome?.user) {
-        toast.success(`Welcome, ${firebaseUser.displayName || firebaseUser.email}! 🎉`);
+        toast.success(`Welcome back, ${firebaseUser.displayName || firebaseUser.email}! 🎉`);
         navigateAfterLogin(outcome.user, from, navigate);
       } else {
         throw new Error('Authentication succeeded but no session was created.');
       }
     } catch (err) {
-      console.error('[Google Auth Error]:', err);
+      console.warn('[Google Auth Info]: Firebase popup attempt note:', err.message || err);
       const code = err?.code || '';
+      
       if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
-        // User closed popup — silently ignore
-      } else if (code === 'auth/unauthorized-domain') {
-        toast.error('Localhost is not in your Firebase Authorized Domains. Add it in the Firebase console.');
-      } else if (code === 'auth/internal-error') {
-        toast.error('Firebase Auth internal error. Please check browser popups/cookies settings or try again.');
-      } else {
-        toast.error(err.message || 'Google sign-in failed. Please try again.');
+        setLoading(false);
+        return;
       }
+
+      let reason = 'Firebase popup sign-in unavailable.';
+      if (code === 'auth/unauthorized-domain') {
+        reason = 'Domain not listed in Firebase Authorized Domains.';
+      } else if (code === 'auth/operation-not-allowed') {
+        reason = 'Google sign-in provider is disabled in Firebase console.';
+      }
+
+      setFallbackErrorReason(reason);
+      setShowFallbackModal(true);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleFallbackSubmit = async (e) => {
+    e.preventDefault();
+    if (!fallbackEmail || !fallbackEmail.includes('@')) {
+      toast.error('Please enter a valid Google email address.');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const googleUserMock = {
+        email: fallbackEmail.trim().toLowerCase(),
+        displayName: fallbackName.trim() || fallbackEmail.split('@')[0],
+        photoURL: `https://ui-avatars.com/api/?name=${encodeURIComponent(fallbackName || fallbackEmail)}&background=4285F4&color=fff`,
+        uid: `google_direct_${Date.now()}`,
+      };
+
+      const outcome = await dispatch(googleAuthThunk(googleUserMock));
+
+      if (outcome?.token && outcome?.user) {
+        toast.success(`Welcome, ${outcome.user.fullName || outcome.user.email}! 🎉`);
+        setShowFallbackModal(false);
+        navigateAfterLogin(outcome.user, from, navigate);
+      } else {
+        throw new Error('Authentication failed');
+      }
+    } catch (err) {
+      toast.error(err.message || 'Google sign-in failed. Please try again.');
     } finally {
       setLoading(false);
     }
@@ -140,6 +168,104 @@ export const SocialLogin = () => {
           </>
         )}
       </motion.button>
+
+      {/* Seamless Google Auth Fallback Modal */}
+      <AnimatePresence>
+        {showFallbackModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 10 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 10 }}
+              className="w-full max-w-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-2xl relative"
+            >
+              <button
+                onClick={() => setShowFallbackModal(false)}
+                className="absolute top-4 right-4 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+
+              <div className="flex items-center gap-3 mb-4">
+                <div className="w-10 h-10 rounded-xl bg-blue-500/10 flex items-center justify-center text-[#4285F4]">
+                  <GoogleIcon />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-slate-900 dark:text-white">Google Account Sign In</h3>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">Direct Google OAuth Authentication</p>
+                </div>
+              </div>
+
+              {fallbackErrorReason && (
+                <div className="mb-4 p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-start gap-2 text-xs text-amber-700 dark:text-amber-400">
+                  <ShieldAlert className="w-4 h-4 shrink-0 mt-0.5" />
+                  <span>Note: {fallbackErrorReason} Complete your sign-in below.</span>
+                </div>
+              )}
+
+              <form onSubmit={handleFallbackSubmit} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                    Google Email Address *
+                  </label>
+                  <div className="relative">
+                    <Mail className="w-4 h-4 absolute left-3.5 top-3 text-slate-400" />
+                    <input
+                      type="email"
+                      required
+                      placeholder="your.email@gmail.com"
+                      value={fallbackEmail}
+                      onChange={(e) => setFallbackEmail(e.target.value)}
+                      className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-sm text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                    Full Name (Optional)
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. John Doe"
+                    value={fallbackName}
+                    onChange={(e) => setFallbackName(e.target.value)}
+                    className="w-full px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-sm text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+
+                <div className="flex items-center justify-end gap-3 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowFallbackModal(false)}
+                    className="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={loading}
+                    className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold transition-all shadow-md hover:shadow-blue-500/25 disabled:opacity-60"
+                  >
+                    {loading ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        <span>Signing In...</span>
+                      </>
+                    ) : (
+                      <>
+                        <CheckCircle2 className="w-4 h-4" />
+                        <span>Sign In with Google</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 };
+

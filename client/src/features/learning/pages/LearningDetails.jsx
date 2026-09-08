@@ -22,8 +22,13 @@ export const LearningDetails = () => {
     if (!courseId) return;
     setLoading(true);
     
-    // Check if courseId matches a native track directly
-    const nativeMatch = NATIVE_ROADMAPS.find(r => r.id === courseId || r.id.toLowerCase() === courseId.toLowerCase());
+    const cleanId = courseId.toLowerCase().trim();
+    const nativeMatch = NATIVE_ROADMAPS.find(r => 
+      r.id.toLowerCase() === cleanId || 
+      (r._id && r._id.toString().toLowerCase() === cleanId) ||
+      (r.slug && r.slug.toLowerCase() === cleanId) ||
+      r.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').includes(cleanId)
+    );
     
     Promise.allSettled([
       fetchCourseDetailsAPI(courseId),
@@ -40,7 +45,6 @@ export const LearningDetails = () => {
     }).catch(() => {
       if (nativeMatch) setCourse(nativeMatch);
     }).finally(() => {
-      if (!course && nativeMatch) setCourse(nativeMatch);
       setLoading(false);
     });
   }, [courseId]);

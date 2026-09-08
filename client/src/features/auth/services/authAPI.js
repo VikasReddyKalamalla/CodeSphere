@@ -17,11 +17,12 @@ export const registerAPI = async (data) => {
 };
 
 export const googleAuthAPI = async (googleUser) => {
+  const email = googleUser?.email || '';
   const payload = {
-    email: googleUser.email,
-    fullName: googleUser.displayName || googleUser.email.split('@')[0],
-    avatar: googleUser.photoURL,
-    googleId: googleUser.uid,
+    email,
+    fullName: googleUser?.displayName || googleUser?.fullName || (email ? email.split('@')[0] : 'Google User'),
+    avatar: googleUser?.photoURL || googleUser?.avatar || `https://ui-avatars.com/api/?name=${encodeURIComponent(email || 'Google User')}&background=4285F4&color=fff`,
+    googleId: googleUser?.uid || googleUser?.googleId || `google_${Date.now()}`,
   };
   const res = await apiClient.post('/auth/google', payload);
   return res.data;

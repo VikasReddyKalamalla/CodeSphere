@@ -1,0 +1,113 @@
+version: '3.8'
+
+services:
+  # ─── MongoDB Production Instance ──────────────────────────────────────────
+  mongodb:
+    image: mongo:7-jammy
+    container_name: codesphere-prod-mongo
+    restart: always
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:-codesphere_admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-rootpassword}
+      MONGO_INITDB_DATABASE: codesphere
+    # Fix 2: WiredTiger cache lowered to 1.0 GB to give room for Mongo indexes & buffer stacks within 3 GB container limit
+    command: mongod --wiredTigerCacheSizeGB 1.0 --bind_ip_all
+    volumes:
+      - mongo_prod_data:/data/db
+    networks:
+      - codesphere-prod-net
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 3072M
+
+  # ─── Redis Cache & Socket Adapter ─────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: codesphere-prod-redis
+    restart: always
+    command: redis-server --requirepass ${REDIS_PASSWORD:-redispassword} --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_prod_data:/data
+    networks:
+      - codesphere-prod-net
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 768M
+
+  # ─── Node.js Core Backend Server ───────────────────────────────────────────
+  server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: codesphere-prod-server
+    restart: always
+    environment:
+      NODE_ENV: production
+      PORT: 5000
+      MONGO_URI: mongodb://${MONGO_ROOT_USERNAME:-codesphere_admin}:${MONGO_ROOT_PASSWORD:-rootpassword}@mongodb:27017/codesphere?authSource=admin
+      REDIS_URL: redis://default:${REDIS_PASSWORD:-redispassword}@redis:6379
+      JWT_SECRET: ${JWT_SECRET:-prod_secret_jwt_key_change_in_env}
+      JUDGE0_API_URL: http://judge0-server:2358
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+    depends_on:
+      - mongodb
+      - redis
+    networks:
+      - codesphere-prod-net
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2048M
+
+  # ─── Self-Hosted Judge0 Code Execution Server ─────────────────────────────
+  judge0-server:
+    image: judge0/judge0:1.13.1
+    container_name: codesphere-prod-judge0
+    restart: always
+    ports:
+      - "2358:2358"
+    environment:
+      AUTH_TOKEN: ${JUDGE0_AUTH_TOKEN:-judge0_secret_token}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-redispassword}
+    privileged: true
+    volumes:
+      # Fix 1: Mount Docker daemon socket so Judge0 can spawn sub-container execution sandboxes
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - codesphere-prod-net
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 4096M
+
+  # ─── Nginx Edge Reverse Proxy ──────────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    container_name: codesphere-prod-nginx
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.prod.conf:/etc/nginx/nginx.conf:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    depends_on:
+      - server
+    networks:
+      - codesphere-prod-net
+
+volumes:
+  mongo_prod_data:
+  redis_prod_data:
+
+networks:
+  codesphere-prod-net:
+    driver: bridge
